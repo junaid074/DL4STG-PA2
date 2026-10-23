@@ -23,20 +23,38 @@ def load_moving_mnist(root: Path) -> torch.Tensor:
     """
     root = Path(root)
     root.mkdir(parents=True, exist_ok=True)
+    cache = root / "moving_mnist_10000.pt"
+    if cache.exists():
+        return torch.load(cache, map_location="cpu", weights_only=True)
+
     ds = MovingMNIST(root=str(root), split=None, download=True)
-    # torchvision returns (20, 1, 64, 64) uint8 or similar per item
-    videos = []
-    for i in range(len(ds)):
-        v = ds[i]
-        if isinstance(v, (tuple, list)):
-            v = v[0]
+    # Fast path: underlying tensor if exposed
+    if hasattr(ds, "data"):
+        v = ds.data
+        if not torch.is_tensor(v):
+            v = torch.as_tensor(v)
         v = v.float()
         if v.max() > 1.5:
             v = v / 255.0
-        if v.ndim == 3:
-            v = v.unsqueeze(1)  # (20, H, W) → (20, 1, H, W)
-        videos.append(v)
-    return torch.stack(videos, dim=0)
+        if v.ndim == 4:  # (N, 20, H, W)
+            v = v.unsqueeze(2)
+        torch.save(v, cache)
+        return v
+
+    videos = []
+    for i in range(len(ds)):
+        item = ds[i]
+        if isinstance(item, (tuple, list)):
+            item = item[0]
+        item = item.float()
+        if item.max() > 1.5:
+            item = item / 255.0
+        if item.ndim == 3:
+            item = item.unsqueeze(1)
+        videos.append(item)
+    v = torch.stack(videos, dim=0)
+    torch.save(v, cache)
+    return v
 
 
 class WindowDataset(Dataset):

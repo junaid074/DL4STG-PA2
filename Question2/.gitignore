@@ -4,3 +4,6 @@ __pycache__/
 .DS_Store
 logs/*.log
 .venv/
+Question2/data/
+Question2/checkpoints/*.pt
+Question2/logs/

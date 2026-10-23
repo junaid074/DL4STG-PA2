@@ -97,11 +97,11 @@ def model_a() -> ConvLSTMForecaster:
 
 def model_d() -> ConvLSTMForecaster:
     """
-    Larger reach: 5×5 kernels, patch=4, 2 layers, hidden=46 (P≈709k < 721176).
-    Reach: each 5×5 moves 2 cells in folded space → 8 px per layer;
-    two layers from input → 16 px/step (A was 8).
+    Larger reach: same width as A, but dilated 3×3 (dilation=2).
+    Receptive field radius per layer = 2 cells → 8 px; two layers → 16 px/step
+    (A was 8). Params stay 480,784 (< 721,176).
     """
-    return ConvLSTMForecaster(hidden=46, kernel=5, patch=4, dilation=1, n_layers=2)
+    return ConvLSTMForecaster(hidden=64, kernel=3, patch=4, dilation=2, n_layers=2)
 
 
 class BlankPredictor(nn.Module):
