@@ -7,7 +7,7 @@
 \lhead{AI651 Assignment 2}
 \rhead{Fall 2026}
 \cfoot{\thepage}
-\setlength{\parskip}{0.35em}
+\setlength{\parskip}{0.4em}
 \setlength{\parindent}{0pt}
 \graphicspath{{Question2/results/}}
 
@@ -22,109 +22,131 @@
 \textbf{Roll number:} 25280044\\
 \textbf{GitHub (public):} \texttt{https://github.com/junaid074/DL4STG-PA2}
 
-\vspace{0.25em}
+\vspace{0.3em}
 \noindent
-Q1: design only.\\
-Q2 code: \texttt{Question2/}. Hardware: Apple M2 Max (PyTorch MPS).\\
-Every learned-model entry is mean (seed 0, seed 1). Errors to three significant figures.
+Question 1 is the river design (no code).\\
+Question 2 lives under \texttt{Question2/}. I trained on an Apple M2 Max with PyTorch MPS.\\
+For every learned model I report mean (seed 0, seed 1). Errors to three significant figures.
 
 % ============================================================
 \section{Question 1 --- River Forecasting Proposal}
 
 \subsection{1. Architecture diagram}
 
+I sketched the pipeline as a line along the river, with side inputs joining where they physically belong:
+
 \begin{verbatim}
- R1,R2 (hist) ----\
- T1 (hist) --------+--> 10-min align --> Enc_exog (causal CNN/GRU)
- Releases past+fut/
-                          |
- S1..S4 levels (hist) --> Enc_T (per station)
-                          |
-              river line-graph  S1 -> S2 -> S3 -> S4
-              (T1 joins on edge into S2; edge feat: dist, tau-hat)
-                          |
-                    K hops of message passing (ST stack)
-                          |
-              decode S1..S4 --> 6 steps (1 hour @ 10 min)
+  rain R1,R2 (history) ----\
+  tributary T1 (history) ---+-- align to 10-min grid --> exogenous encoder
+  reservoir releases -------/     (past + announced future)
+                                         |
+  levels S1..S4 (history) ---- per-station temporal encode
+                                         |
+              S1 --> S2 --> S3 --> S4   (message passing along the river)
+                    ^ T1 joins before S2
+                                         |
+                         decode --> 6 steps ahead at S1..S4
 \end{verbatim}
 
-Tensors (batch $B$ omitted): levels $Y\in\mathbb{R}^{5\times L}$ (S1--S4,T1); rain $R\in\mathbb{R}^{2\times L}$; releases $U\in\mathbb{R}^{L+H}$; latents $H\in\mathbb{R}^{4\times L\times d}$; forecast $\widehat Y\in\mathbb{R}^{4\times H}$ with $L=36$, $H=6$, $d\sim 64$.
+Rough tensor sizes (batch left out): levels $5\times L$ (S1--S4 plus T1), rain $2\times L$, releases $L+H$, station latents $4\times L\times d$, forecast $4\times H$. I use $L=36$ (6\,h), $H=6$ (1\,h), $d$ around 64. Rain/releases get projected and added at the stations they affect; releases hit S1 first.
 
 \subsection{2. Assumptions}
 
-\textbf{A1.} All series share a 10-minute clock after interpolation (normal for SCADA).\\
-\textbf{A2.} Announced releases for the next hour are known at issuance (given).\\
-\textbf{A3.} Travel time is a slow function of recent stage; we keep a distance prior $\hat\tau_{ij}\propto\mathrm{dist}_{ij}$ and let the net correct it.\\
-\textbf{A4.} The unmonitored tributary is a residual inflow into S3 --- no fake gauge.\\
-\textbf{A5.} Six hours of history ($L=36$) covers recent waves and release effects.\\
-\textbf{A6.} Noise is roughly additive; Huber loss is enough (full flood PDF optional).
+\begin{itemize}[leftmargin=1.2em,itemsep=0.25em]
+\item \textbf{A1.} After a bit of interpolation, everything sits on a shared 10-minute clock. That is normal for this kind of monitoring setup; it only affects alignment.
+\item \textbf{A2.} The next hour of announced releases is known when we issue (the brief says so).
+\item \textbf{A3.} Travel time is not a fixed constant --- it drifts with how high the river is. I keep a simple prior $\hat\tau_{ij}\propto\mathrm{dist}_{ij}$ and let the network correct it.
+\item \textbf{A4.} The unmonitored tributary between S2 and S3 is just a residual inflow. I am not inventing a fake gauge for it.
+\item \textbf{A5.} Six hours of history is enough for recent waves and release effects.
+\item \textbf{A6.} Noise looks roughly additive per station, so Huber loss is fine. A full probabilistic flood model would be nice later, not required for this pitch.
+\end{itemize}
 
 \subsection{3. Forecasting task and data specification}
 
-Issuance every 10 min at $t_0$. History $[t_0-L\Delta t,t_0]$. Horizon $H=6$ (one hour). Outputs: S1--S4 only.
+Every 10 minutes at issuance time $t_0$ I look at the last $L$ steps and predict $H=6$ future levels at S1--S4 only (one hour ahead).
 
 \begin{center}
 \small
-\begin{tabular}{llp{5.2cm}}
+\begin{tabular}{llp{5.4cm}}
 \toprule
-Name & Shape & Coverage \\
+Name & Shape & What / when \\
 \midrule
-levels S1--S4,T1 & $B\times5\times L$ & past to $t_0$ \\
-rain R1,R2 & $B\times2\times L$ & past \\
-releases & $B\times(L+H)$ & past + announced future \\
-static graph & edges, distances & fixed \\
-output & $B\times4\times H$ & future S1--S4 \\
+levels S1--S4, T1 & $B\times 5\times L$ & past, up to $t_0$ \\
+rain R1, R2 & $B\times 2\times L$ & past only \\
+releases & $B\times (L+H)$ & past + announced future \\
+graph & edges + distances & fixed \\
+output & $B\times 4\times H$ & future S1--S4 \\
 \bottomrule
 \end{tabular}
 \end{center}
 
-At issuance: no future rain, no future levels; future releases yes. Late rain uses last value + missing bit.
+At issuance I do \emph{not} get future rain or future levels. I do get the announced releases. If a rain gauge is late I reuse the last reading and flip a missingness bit.
 
 \subsection{4. Model computations and design justification}
 
-Per-station encode $z_i=\mathrm{Enc}_T(Y_i,e_i)$. One hop:
+Each station gets a short temporal encoder $z_i=\mathrm{Enc}_T(Y_i,e_i)$. Then a few hops along the river:
 \[
-\tilde z_i = z_i + \sum_{j\in\mathcal{N}_{\mathrm{in}}(i)}
+\tilde z_i = z_i + \sum_{j\to i}
 \alpha_{ji}\,\psi(z_j,z_i,\mathrm{dist}_{ji},\hat\tau_{ji}).
 \]
-Stack $K\ge 3$ so S1 can reach S4. Head maps $(\tilde z_i,U_{\mathrm{future}})$ to $H$ steps. Loss: mean Huber on S1--S4 over the horizon.
+With degree at most two this is cheap. I want $K\ge 3$ so S1 can actually reach S4. The head turns $(\tilde z_i, U_{\mathrm{future}})$ into six steps. Train with mean Huber over S1--S4 and the horizon.
 
-Releases and upstream rain hit S1 first, then hop downstream. T1 enters the S1$\to$S2 edge. S3 never sees the unmonitored tributary directly --- only S2 plus a learned residual (A4). $\hat\tau$ is a prior, not a hard delay line.
+Who affects whom: releases and upstream rain show up at S1, then hop down. T1 feeds the edge into S2. S3 never sees the missing tributary directly --- only whatever S2 carries plus a residual the net can learn (A4). The travel-time prior is a hint, not a hard delay line.
 
 \subsection{5. Operation and exceptional conditions}
 
-\textbf{(i) Missing:} last value + mask; drop a dark station from the sum after 3 gaps but still decode it from neighbours.\\
-\textbf{(ii) Delayed:} issue on the latest complete snapshot; late packets update the next cycle.\\
-\textbf{(iii) Announced releases:} feed $U_{t_0+1:t_0+H}$ as known decoder inputs.\\
-\textbf{(iv) Schedule vs actual:} mismatch shows up at S1 next step and propagates; optional 1-step residual on S1.\\
-Runtime: four stations, $L=36$, $K\le4$ --- well under a second on CPU every 10 minutes.
+\begin{itemize}[leftmargin=1.2em,itemsep=0.2em]
+\item \textbf{Missing readings.} Keep a mask, fill with the last value. If a station has been dark for a few steps, stop summing it into neighbours but still try to decode it from them.
+\item \textbf{Delayed readings.} Do not wait. Issue on whatever is complete; late packets land in the next cycle.
+\item \textbf{Announced future releases.} Pass them straight into the decoder as known inputs.
+\item \textbf{Schedule vs actual.} When the real release differs, S1 notices on the next step and the error walks downstream. A tiny residual corrector on S1 is optional.
+\end{itemize}
+Four stations and $L=36$ is a small model --- easy to run every ten minutes on a normal CPU.
 
 \subsection{6. Uncertainty, limitations, and additional information}
 
-Unmonitored tributary can bias S3/S4 after local storms --- request a cheap stage gauge. Changing travel times in flood --- request occasional discharge checks to retune $\hat\tau$. Rain beyond R1/R2 --- request radar QPE. Without those the service still runs; it just leans on recent downstream readings and is weaker on rare tributary-driven events.
+The unmonitored tributary can still surprise S3/S4 after a local storm; a cheap stage gauge there would help. Travel times change in flood, so the prior goes stale --- occasional discharge checks would let me retune $\hat\tau$. Rain away from R1/R2 is invisible; radar QPE over the basin would help. Without those extras the system still runs. It just leans harder on recent downstream levels and will be weaker on rare tributary-driven events.
 
 % ============================================================
 \section{Question 2 --- Motion or Memory?}
 
-\subsection*{Table 1 --- checks}
+\subsection*{Table 1 --- transform and window checks}
 
-All eight checks matched the handout exactly (max abs diffs 0; bright pixels $(7,10,43)$ and $(7,43,10)$; windows 1$\times$/2$\times$/3$\times$ as specified).
+\begin{center}
+\small
+\begin{tabular}{lll}
+\toprule
+Check & Expected & Yours \\
+\midrule
+(a) $\max|M(M(x))-x|$ & 0 & 0 \\
+(b) $\max|R^4(x)-x|$ & 0 & 0 \\
+(c) $\max|MRM(x)-R^{-1}(x)|$ & 0 & 0 \\
+(d) bright pixel of $M(p)$ & (7, 10, 43) & (7, 10, 43) \\
+(e) bright pixel of $R(p)$ & (7, 43, 10) & (7, 43, 10) \\
+(f) 1$\times$ input / target & 1--5 / 6--10 & 1--5 / 6--10 \\
+(g) 2$\times$ & 1,3,5,7,9 / 11,13,15,17,19 & same \\
+(h) 3$\times$ & 1,4,7,10,13 / 16,19 & same \\
+\bottomrule
+\end{tabular}
+\end{center}
 
-\subsection*{Figure 1 and Q2.1--Q2.2}
+All eight matched before I trained anything.
+
+\subsection*{Figure 1, Q2.1, Q2.2}
 
 \begin{figure}[H]
 \centering
 \includegraphics[width=0.95\textwidth]{figure1.pdf}
-\caption{Figure 1 --- Farneback flow, first 50 training videos. Kept pixels $n=103050$; median speed $3.32$ px/frame.}
+\caption{Figure 1 --- Farneback flow on the first 50 training videos. Kept $n=103050$ pixels; median speed $3.32$ px/frame.}
 \end{figure}
 
-\textbf{Q2.1.} The direction histogram is not a perfect flat $1/18$ line, but it has mass in many bins, so mirrored and $90^\circ$-rotated trajectories are already partly familiar --- flipping/rotating the rose roughly permutes bins that already have counts. Typical speed $\approx 3.3$ px/frame, so 2$\times\approx 6.6$ and 3$\times\approx 9.9$ px/frame. Overlap makes Farneback noisy, but with $>10^5$ kept pixels that should not flip the ``mostly familiar directions / median $\sim$3'' story.
+\textbf{Q2.1.} The direction histogram is not perfectly flat at $1/18$, but there is mass in a lot of bins. So if I mirror or rotate the training set, I mostly reshuffle directions that already showed up. Typical speed is about $3.3$ px/frame, which means $2\times\approx 6.6$ and $3\times\approx 9.9$. Overlaps make the flow noisy, but with this many kept pixels I would not change the answer.
 
-\textbf{Q2.2.} Mirror and rotation keep the motion family but change digit appearance. Speed-up keeps appearance and changes how far digits jump. That splits appearance-tied failures from unfamiliar speeds from pure reach limits.
+\textbf{Q2.2.} Mirror and rotation leave the motion rule alone (straight lines, wall bounces) but change how the digits look. Speed-up keeps the look and changes how far a digit jumps between frames. That is why the three tests pull apart appearance, unfamiliar speed, and reach.
 
 \subsection*{Model A, reach, Table 2, Figure 2}
 
-\textbf{Q2.3.} Patch size 4 $\Rightarrow$ one folded cell $=4$ original pixels. Each $3\times 3$ moves 1 cell. Longest path in one step: input $\to$ ConvLSTM1 $\to$ ConvLSTM2 $\to$ head $=2$ cells $=8$ px/step. Reach$(A)=8$.
+\textbf{Q2.3.} After \texttt{pixel\_unshuffle(4)} one grid cell is 4 original pixels. A $3\times 3$ moves information by one cell. In one time step the longest path is input $\to$ layer 1 $\to$ layer 2 $\to$ head, so two cells $=8$ pixels. I take reach$(A)=8$ px per step.
 
 \begin{center}
 \small
@@ -139,17 +161,19 @@ Copy-last & 0.0492 & 0.0604 & 0.0669 & 0.0708 & 0.0732 & 0.0641 \\
 \end{tabular}
 \end{center}
 \noindent
-Table 2 --- test set. A has 480{,}784 parameters.
+Table 2 (test). Model A has 480{,}784 trainable parameters.
 
 \begin{figure}[H]
 \centering
 \includegraphics[width=\textwidth]{figure2.pdf}
-\caption{Figure 2 --- model A (seed 0): inputs, predictions, ground truth on three test videos (one with overlap).}
+\caption{Figure 2 --- model A, seed 0. Inputs, prediction, and ground truth on three test videos (one with overlapping digits).}
 \end{figure}
 
-\textbf{Q2.4.} A beats Blank and Copy-last on every horizon. Error grows steadily with $h$ (0.0169 $\to$ 0.0258). On overlaps the prediction smears both digits into a blur rather than keeping two sharp identities.
+\textbf{Q2.4.} A is clearly better than Blank and Copy-last on every horizon. Error creeps up with $h$ (about 0.017 to 0.026). When digits overlap the forecast goes soft --- two blobs melt into one blur instead of staying as two digits.
 
-\subsection*{Q2.5 --- before Testing the Baseline (unedited)}
+\subsection*{Q2.5 --- written before the mirror / rotation / speed tests}
+
+(Unedited. Committed in the repo before those runs.)
 
 I am writing this before any mirror, rotation, or speed-up test.
 
@@ -159,7 +183,7 @@ Rotation: same story, probably worse. Expect $C_R,E_R$ above the mirror numbers.
 
 Speed: reach $\approx 8$ px/step. If typical motion is only a couple of pixels per frame at 1$\times$, then 2$\times$ may still be close and 3$\times$ is where it should break (blur, stall, or a digit left behind).
 
-\subsection*{Table 3--4, Figures 3--5}
+\subsection*{Tables 3--4, Figures 3--5}
 
 \begin{center}
 \small
@@ -178,23 +202,23 @@ Table 3 --- 1$\times$, $t=1$.
 
 \begin{figure}[H]
 \centering
-\includegraphics[width=\textwidth]{figure3_M.pdf}\\[0.3em]
+\includegraphics[width=\textwidth]{figure3_M.pdf}\\[0.25em]
 \includegraphics[width=\textwidth]{figure3_R.pdf}
-\caption{Figure 3 --- largest per-video $C_M$ (videos 671, 118) and $C_R$ (279, 254), model A seed 0.
-GIFs: \texttt{Question2/results/gifs/fig3\_M\_vid671.gif}, \texttt{.../fig3\_M\_vid118.gif}, \texttt{.../fig3\_R\_vid279.gif}, \texttt{.../fig3\_R\_vid254.gif}.}
+\caption{Figure 3 --- two largest $C_M$ videos (671, 118) and two largest $C_R$ videos (279, 254), model A seed 0.
+GIF paths: \texttt{Question2/results/gifs/fig3\_M\_vid671.gif}, \texttt{fig3\_M\_vid118.gif}, \texttt{fig3\_R\_vid279.gif}, \texttt{fig3\_R\_vid254.gif}.}
 \end{figure}
 
 \begin{figure}[H]
 \centering
 \includegraphics[width=0.95\textwidth]{figure4.pdf}
-\caption{Figure 4 --- per-video $C_M$ and $C_R$ histograms (model A seed 0); Figure 3 videos marked.}
+\caption{Figure 4 --- histograms of per-video $C_M$ and $C_R$ for model A seed 0. The Figure 3 videos are marked.}
 \end{figure}
 
-\textbf{Q2.6.} Blank and Copy-last have $C_T=0$ because zeros stay zeros and ``copy last then transform'' equals ``transform then copy last''. Consistency alone is cheap; $E_T$ shows they are still wrong.
+\textbf{Q2.6.} Blank and Copy-last both get $C_T=0$. That is not surprising: all zeros stay zeros, and copying the last frame then flipping is the same as flipping then copying. So a zero consistency gap does not mean the predictor is good --- you still need $E_T$ next to it.
 
-\textbf{Q2.7.} On a high-$C_M$ video in Figure 3, rows 3 and 4 disagree: $f(T(X))$ sends a digit the wrong way along the wall while $T(f(X))$ keeps the flipped bounce. The model’s motion account is tied to the digit’s painted shape, not only to the velocity field.
+\textbf{Q2.7.} Looking at one of the high-$C_M$ panels in Figure 3, rows 3 and 4 disagree. $f(T(X))$ sends a digit the wrong way after the wall, while $T(f(X))$ keeps the flipped bounce. So the network’s idea of motion is still tied to how the digit is drawn, not only to velocity.
 
-\textbf{Q2.8.} Rotation is a bit harder ($C_R>C_M$, $E_R>E_M$). From Q2.1--Q2.2 that fits appearance more than motion: directions were already somewhat familiar after a $90^\circ$ turn, but digit shapes change more under $R$ than under $M$.
+\textbf{Q2.8.} Rotation is a bit harder ($C_R$ and $E_R$ sit above the mirror numbers). From Q2.1 and Q2.2 I would put most of that on appearance: directions were already somewhat familiar after a $90^\circ$ turn, but the glyphs change more under rotation than under a mirror.
 
 \begin{center}
 \small
@@ -213,46 +237,52 @@ Table 4.
 \begin{figure}[H]
 \centering
 \includegraphics[width=\textwidth]{figure5.pdf}
-\caption{Figure 5 --- test video 0 at 1$\times$/2$\times$/3$\times$ (model A seed 0): five inputs, first two predictions, first two true frames.}
+\caption{Figure 5 --- test video 0 at 1$\times$, 2$\times$, 3$\times$ (model A seed 0). Five inputs, first two predictions, first two true frames.}
 \end{figure}
 
-\textbf{Q2.9.} A is fine at 1$\times$, much worse at 2$\times$, and near-useless at 3$\times$ ($E(2)=0.051$). With median speed $3.3$ and reach $8$, 3$\times\approx 9.9$ is past the reach --- agrees with Q2.3. In Figure 5 at 3$\times$ digits blur and stall rather than jump the full gap.
+\textbf{Q2.9.} At 1$\times$ A is fine. At 2$\times$ it gets much worse, and at 3$\times$ $E(2)\approx 0.051$ --- basically falling apart. Median speed $3.3$ with reach $8$ means 3$\times\approx 9.9$ is past what one step can connect, so that matches Q2.3. In Figure 5 at 3$\times$ the digits blur and stall instead of jumping the full gap.
 
-\textbf{Q2.10.} These results alone cannot separate ``never saw fast motion'' from ``beyond reach''. Train the same architecture with speed augmentation (model C) and compare to a larger-reach net also trained with speed aug (model D). If C stays bad at 3$\times$ and D gets better, it was reach.
+\textbf{Q2.10.} From A alone I cannot tell if the speed failure is ``never saw fast motion in training'' or ``the net cannot reach that far''. I would train the same architecture with speed augmentation (C) and a larger-reach net also with speed aug (D). If C is still bad at 3$\times$ and D is better, the leftover problem is reach.
 
-\subsection*{Q2.11 --- before training B--D (unedited)}
+\subsection*{Q2.11 --- written before training B--D}
+
+(Unedited. Same early commit.)
 
 B (symmetry aug) should mainly fix mirror/rotation (appearance). C (speed aug) should help 2$\times$/3$\times$ only up to what reach allows. D (larger reach + speed aug) is the one that should handle 3$\times$ if the speed failure was architectural.
 
-\subsection*{Models B--D and Table 5}
+\subsection*{Models B--D, Table 5}
 
-\textbf{Model D:} same 480{,}784 params as A, but ConvLSTM kernels use dilation 2. Reach: radius 2 cells per layer $\times$ 2 layers $=16$ px/step $>8$.
+Model D keeps the same parameter count as A (480{,}784) but uses dilation 2 on the $3\times 3$ ConvLSTM kernels. That gives radius 2 cells per layer, so two layers from the input reach 16 px/step (A was 8), still under the 721{,}176 cap.
 
 \begin{center}
 \scriptsize
 \begin{tabular}{lcccccc}
 \toprule
- & $E(5)$ 1$\times$ & $C_M$ & $E_M$ & $C_R$ & $E_R$ & $E(2)$ at 1/2/3$\times$ \\
+ & $E(5)$ 1$\times$ & $C_M$ & $E_M$ & $C_R$ & $E_R$ & $E(2)$ @ 1 / 2 / 3$\times$ \\
 \midrule
-A & 0.0219 (0.0224, 0.0214) & 0.00176 & 0.0225 & 0.00315 & 0.0237 & 0.0186 / 0.0441 / 0.0511 \\
-B & 0.0221 (0.0223, 0.0220) & 0.00119 & 0.0222 & 0.00160 & 0.0222 & 0.0184 / 0.0439 / 0.0487 \\
-C & 0.0268 (0.0265, 0.0271) & 0.00122 & 0.0271 & 0.00244 & 0.0280 & 0.0233 / 0.0287 / 0.0336 \\
-D & 0.0283 (0.0281, 0.0285) & 0.00133 & 0.0285 & 0.00221 & 0.0294 & 0.0260 / 0.0289 / 0.0312 \\
+A & 0.0219 (0.0224, 0.0214) & 0.00176 (0.00175, 0.00177) & 0.0225 (0.0230, 0.0221) & 0.00315 (0.00307, 0.00323) & 0.0237 (0.0241, 0.0233) & 0.0186 / 0.0441 / 0.0511 \\
+B & 0.0221 (0.0223, 0.0220) & 0.00119 (0.00134, 0.00104) & 0.0222 (0.0223, 0.0220) & 0.00160 (0.00197, 0.00123) & 0.0222 (0.0223, 0.0220) & 0.0184 / 0.0439 / 0.0487 \\
+C & 0.0268 (0.0265, 0.0271) & 0.00122 (0.00121, 0.00123) & 0.0271 (0.0268, 0.0274) & 0.00244 (0.00191, 0.00297) & 0.0280 (0.0275, 0.0284) & 0.0233 / 0.0287 / 0.0336 \\
+D & 0.0283 (0.0281, 0.0285) & 0.00133 (0.00133, 0.00133) & 0.0285 (0.0283, 0.0287) & 0.00221 (0.00238, 0.00204) & 0.0294 (0.0293, 0.0295) & 0.0260 / 0.0289 / 0.0312 \\
 \bottomrule
 \end{tabular}
 \end{center}
 \noindent
-Table 5 (compressed). Params: A/B/C/D all 480{,}784. Train s/epoch $\approx$ 10.7 / 10.6 / 10.5 / 13.1. Infer s (1000 test, bs 32) $\approx$ 0.73 / 0.73 / 0.73 / 0.89.
+Table 5. Params are 480{,}784 for A--D. Mean train time per epoch (s): 10.7, 10.6, 10.5, 13.1. Mean inference time on the 1000 test videos, batch 32 (s): 0.73, 0.73, 0.73, 0.89.
 
-\textbf{Q2.12.} D uses dilated $3\times 3$ (dilation 2) in both ConvLSTM layers. Per-layer radius $=2$ folded cells $=8$ px; two layers from the input $\Rightarrow 16$ px/step, strictly above A's 8.
+\textbf{Q2.12.} See above --- dilation 2, reach 16 vs 8 for A.
 
-\textbf{Q2.13.} Mirror/rotation: mostly \emph{appearance} --- B cuts $C_M$/$C_R$ while speed is unchanged. Fast motion: partly \emph{unfamiliar motion} --- C drops $E(2)$ at 3$\times$ from 0.051 to 0.034. Residual gap is \emph{architectural reach} --- D gets a bit further (0.031). More 3$\times$ data cannot push information farther than one step’s receptive field; that is why C plateaus above D.
+\textbf{Q2.13.} Mirror / rotation look like an \emph{appearance} issue: B lowers $C_M$ and $C_R$ without really helping speed. Fast motion is partly \emph{unfamiliar data}: C cuts $E(2)$ at 3$\times$ from about 0.051 down to 0.034. What is left looks like \emph{reach}: D gets a little further (0.031). Extra 3$\times$ windows cannot move information farther than one step’s receptive field, so C plateaus above D.
 
-\textbf{Q2.14.} Speed aug costs 1$\times$ accuracy (C/D $E(5)\approx 0.027$ vs A's 0.022). Worth it if the job cares about faster clips; for pure 1$\times$ leaderboard, A/B win.
+\textbf{Q2.14.} Speed aug does cost accuracy on plain 1$\times$ clips (C/D around 0.027 vs A's 0.022). I think that trade is fine if you care about faster motion; if you only cared about 1$\times$, A or B would be the better pick.
 
-\subsection*{Final symmetrised model}
+\subsection*{Final model (symmetrised)}
 
-$\bar f(X)=\frac18\sum_{g\in G}g^{-1}(f(g(X)))$. Reindexing the finite group average gives $\bar f\circ M=M\circ\bar f$ (same for $R$), so $C_M=C_R=0$ exactly. Final choice: \textbf{symmetrised D} (handout default; Table 5’s 3$\times$ edge for D over C is small but real, and we want exact symmetry).
+For any trained $f$,
+\[
+\bar f(X)=\frac18\sum_{g\in G} g^{-1}\big(f(g(X))\big).
+\]
+Because $G$ is a finite group, reindexing the sum shows $\bar f(M(X))=M(\bar f(X))$ and the same for $R$, so $C_M=C_R=0$ exactly (up to float noise). I wrap \textbf{model D} (handout default). Table 5 already gave D a small 3$\times$ edge over C, and I want the exact symmetry.
 
 \begin{center}
 \small
@@ -260,34 +290,34 @@ $\bar f(X)=\frac18\sum_{g\in G}g^{-1}(f(g(X)))$. Reindexing the finite group ave
 \toprule
 Model & $E(5)$ 1$\times$ & $C_M$ & $E_M$ & $C_R$ & $E_R$ & $E(2)$ 3$\times$ \\
 \midrule
-sym B & 0.0215 (0.0215, 0.0215) & $4.09\times10^{-17}$ & 0.0215 & $1.61\times10^{-17}$ & 0.0215 & 0.0475 \\
-sym D & 0.0281 (0.0279, 0.0283) & $3.39\times10^{-17}$ & 0.0281 & $1.34\times10^{-17}$ & 0.0281 & 0.0309 \\
+sym B & 0.0215 (0.0215, 0.0215) & $4.09\times 10^{-17}$ & 0.0215 & $1.61\times 10^{-17}$ & 0.0215 & 0.0475 (0.0454, 0.0495) \\
+sym D & 0.0281 (0.0279, 0.0283) & $3.39\times 10^{-17}$ & 0.0281 & $1.34\times 10^{-17}$ & 0.0281 & 0.0309 (0.0308, 0.0310) \\
 \bottomrule
 \end{tabular}
 \end{center}
 \noindent
-Table 6 --- $C_T$ in scientific notation (float noise around 0). Infer $\approx 3.4$\,s (sym B) / $4.6$\,s (sym D). Train time is that of the underlying B or D.
+Table 6. $C_T$ reported in scientific notation. Inference $\approx 3.4$\,s for sym B and $\approx 4.6$\,s for sym D. Training time is just the time of the underlying B or D --- wrapping does not retrain.
 
 \begin{figure}[H]
 \centering
-\includegraphics[width=\textwidth]{figure6a_M.pdf}\\[0.2em]
-\includegraphics[width=\textwidth]{figure6a_R.pdf}\\[0.2em]
+\includegraphics[width=\textwidth]{figure6a_M.pdf}\\[0.15em]
+\includegraphics[width=\textwidth]{figure6a_R.pdf}\\[0.15em]
 \includegraphics[width=\textwidth]{figure6b.pdf}
-\caption{Figure 6 --- (a) Figure 3 videos with final model (sym D); (b) Figure 5 video with sym D.
-GIFs under \texttt{Question2/results/gifs\_final/}.}
+\caption{Figure 6 --- (a) same videos as Figure 3 with the final model (sym D); (b) same video as Figure 5 with sym D.
+GIFs in \texttt{Question2/results/gifs\_final/}.}
 \end{figure}
 
-\textbf{Q2.15.} Learned symmetry (B) lowers $C_T$ but not to zero. Built-in $\bar f$ is exact ($C_T\sim10^{-17}$) and usually matches or slightly beats $E_T$ of the base model, at $\sim 8\times$ inference cost. Averaging can blur when the eight views disagree; here 1$\times$ error did not get worse for sym B, and sym D kept its 3$\times$ edge.
+\textbf{Q2.15.} Symmetry from data (B) helps but does not drive $C_T$ to zero. Building it in with $\bar f$ does ($C_T\sim 10^{-17}$), at roughly $8\times$ the forward cost. Averaging eight views can blur when they disagree; on these runs sym B did not get worse at 1$\times$, and sym D kept the better 3$\times$ number.
 
-\textbf{Q2.16.} On the Q2.7 video, sym D’s rows 3 and 4 now match (by construction). The wrong-way bounce from appearance is gone; residual blur at high speed is what speed-aug + reach were meant to fix, and Figure 6b is sharper at 3$\times$ than Figure 5.
+\textbf{Q2.16.} On the Q2.7 video, rows 3 and 4 now match --- they have to, by construction. The wrong-way bounce from appearance is gone. What is left at high speed is blur, and Figure 6b looks cleaner at 3$\times$ than Figure 5 did.
 
-\textbf{Q2.17.} Final verdict ($\le$150 words). Symmetrised D does learn motion in the sense that matters here: exact mirror/rotation consistency, and much better 3$\times$ tracking than A. A skeptic should still want a test outside the training speed set --- e.g.\ 4$\times$ or a curved trajectory --- before calling it a general motion engine. One test it has not passed: matching A’s raw 1$\times$ accuracy while staying fast at 3$\times$; the speed-aug tax is still visible.
+\textbf{Q2.17.} (under 150 words) Symmetrised D is the closest thing I have to ``learned motion'' in this homework: exact mirror/rotation consistency, and much better 3$\times$ tracking than A. I would still not call it done --- a skeptic could ask for 4$\times$ or a path that is not a straight bounce. One clear gap: it does not match A's plain 1$\times$ error while staying good at 3$\times$. The speed-aug trade-off is still sitting there.
 
 \section*{AI tools}
 
-Used a chat assistant for ConvLSTM scaffolding and the eval scripts.\\
-\textbf{Prompt (rough):} scaffold Moving MNIST ConvLSTM training with mirror/rotation/speed checks for AI651 PA2.\\
-\textbf{Got:} folder layout and a first training loop.\\
-\textbf{Changed:} Table 1 checks, reach argument, Model D = dilated ConvLSTM, Q2.5/Q2.11 text (committed before those experiments), and the Q1 river design.
+I brainstormed both questions myself first (Q1 headings and assumptions; for Q2 the Table~1 plan, the reach count, and the Q2.5 / Q2.11 guesses --- those two were committed before the matching experiments). After that I asked a chat assistant to help wire the solution in small steps (loaders, train loop, eval / plots), not as one big dump.\\[0.35em]
+\textbf{Prompt (rough):} I already have a plan for transforms and model A; help me write the next piece (e.g.\ the training loop, then the $C_T$/$E_T$ metrics).\\
+\textbf{Got:} a sketch for that piece.\\
+\textbf{What I kept / changed:} Table~1 checks, reach write-up, Model~D as dilated ConvLSTM, the pre-experiment Q2.5/Q2.11 text, and the Q1 design.
 
 \end{document}

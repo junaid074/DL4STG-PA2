@@ -1,21 +1,21 @@
-"""Mirror / rotation / speed windows for Moving MNIST (Assignment 2 Q2)."""
+# Mirror, rotation, speed windows for Moving MNIST.
 from __future__ import annotations
 
 import torch
 
 
 def mirror(x: torch.Tensor) -> torch.Tensor:
-    """Horizontal flip: (Mx)[i, j] = x[i, 63 - j]. Works on (..., H, W)."""
+    # (Mx)[i, j] = x[i, 63 - j]
     return torch.flip(x, dims=(-1,))
 
 
 def rotate(x: torch.Tensor, k: int = 1) -> torch.Tensor:
-    """90° anticlockwise k times. k can be negative."""
+    # 90 deg CCW, k times (k can be negative)
     return torch.rot90(x, k=k, dims=(-2, -1))
 
 
 def apply_g(x: torch.Tensor, a: int, mirrored: bool) -> torch.Tensor:
-    """g = R^a or M R^a (rotate first, then optional mirror)."""
+    # g = R^a or M R^a (rotate first)
     y = rotate(x, k=a)
     if mirrored:
         y = mirror(y)
@@ -23,9 +23,9 @@ def apply_g(x: torch.Tensor, a: int, mirrored: bool) -> torch.Tensor:
 
 
 def inverse_g(x: torch.Tensor, a: int, mirrored: bool) -> torch.Tensor:
-    """g^{-1}: R^{-a} is inverse of R^a; MRa is self-inverse."""
+    # R^{-a} undoes R^a; MRa undoes itself
     if mirrored:
-        return apply_g(x, a, True)  # involution
+        return apply_g(x, a, True)
     return rotate(x, k=-a)
 
 

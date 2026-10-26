@@ -1,4 +1,4 @@
-"""ConvLSTM forecasters for Assignment 2 Q2."""
+# ConvLSTM bits for Q2 (model A/B/C/D).
 from __future__ import annotations
 
 import torch
@@ -29,10 +29,8 @@ class ConvLSTMCell(nn.Module):
 
 
 class ConvLSTMForecaster(nn.Module):
-    """
-    Model A (and B/C): pixel_unshuffle(4) → 2× ConvLSTM(64, 3×3) → 1×1 → shuffle + sigmoid.
-    Model D can override kernel / dilation / patch.
-    """
+    # A/B/C: unshuffle 4, two ConvLSTM(64, 3x3), 1x1, shuffle+sigmoid.
+    # D can change kernel / dilation / width.
 
     def __init__(
         self,
@@ -96,11 +94,7 @@ def model_a() -> ConvLSTMForecaster:
 
 
 def model_d() -> ConvLSTMForecaster:
-    """
-    Larger reach: same width as A, but dilated 3×3 (dilation=2).
-    Receptive field radius per layer = 2 cells → 8 px; two layers → 16 px/step
-    (A was 8). Params stay 480,784 (< 721,176).
-    """
+    # same size as A, dilation 2 → about 16 px/step reach instead of 8
     return ConvLSTMForecaster(hidden=64, kernel=3, patch=4, dilation=2, n_layers=2)
 
 
